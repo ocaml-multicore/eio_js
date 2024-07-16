@@ -11,6 +11,7 @@ bug-reports: "https://github.com/ocaml-multicore/eio_js/issues"
 depends: [
   "dune" {>= "3.9"}
   "eio_js_backend" {= version}
+  "js_of_ocaml-ppx" {>= "5.0.1"}
   "js_of_ocaml" {>= "5.0.1"}
   "odoc" {with-doc}
 ]
