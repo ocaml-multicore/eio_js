@@ -11,6 +11,7 @@
  (synopsis "Simple Eio scheduler for JavaScript environments")
  (description "An Eio scheduler suitable for JavaScript environments.")
  (depends
+  (mdx (and (>= 2.4.1) :with-test))
   (eio (>= 0.14))))
 (package
  (name eio_brr)
@@ -25,5 +26,6 @@
  (description "An Eio counterpart to package js_of_ocaml-lwt.")
  (depends
   (eio_js_backend (= :version))
+  (js_of_ocaml-ppx (>= "5.0.1"))
   (js_of_ocaml (>= 5.0.1))))
 (using mdx 0.2)
