@@ -12,7 +12,7 @@
  (description "An Eio scheduler suitable for JavaScript environments.")
  (depends
   (mdx (and (>= 2.4.1) :with-test))
-  (eio (>= 0.14))))
+  (eio (>= 1.0))))
 (package
  (name eio_brr)
  (synopsis "Eio support for Brr")
