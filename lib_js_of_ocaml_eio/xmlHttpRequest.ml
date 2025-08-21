@@ -222,9 +222,8 @@ let perform_raw ?(headers = []) ?content_type ?(get_args = [])
             (* IE doesn't have the same semantics for HEADERS_RECEIVED.
                  so we wait til LOADING to check headers. See:
                  http://msdn.microsoft.com/en-us/library/ms534361(v=vs.85).aspx *)
-            | HEADERS_RECEIVED when not Dom_html.onIE ->
+            | HEADERS_RECEIVED ->
                 ignore (do_check_headers ())
-            | LOADING when Dom_html.onIE -> ignore (do_check_headers ())
             | DONE ->
                 (* If we didn't catch a previous event, we check the header. *)
                 if do_check_headers () then
