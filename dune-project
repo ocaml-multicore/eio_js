@@ -26,6 +26,6 @@
  (description "An Eio counterpart to package js_of_ocaml-lwt.")
  (depends
   (eio_js_backend (= :version))
-  (js_of_ocaml-ppx (>= "5.0.1"))
-  (js_of_ocaml (>= 5.0.1))))
+  (js_of_ocaml-ppx (>= "6.0.0"))
+  (js_of_ocaml (>= 6.0.0))))
 (using mdx 0.2)

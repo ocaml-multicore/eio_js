@@ -50,7 +50,7 @@ let make_event event_kind ?use_capture ?passive target =
 type cancel = { cancel : unit -> unit }
 
 let with_error_log f x =
-  try f x with e -> Firebug.console##log (Js.string (Printexc.to_string e))
+  try f x with e -> Console.console##log (Js.string (Printexc.to_string e))
 
 let seq_loop ~sw evh ?(cancel_handler = false) ?use_capture ?passive target
     handler =
@@ -327,11 +327,11 @@ let mousewheel ?use_capture ?passive target =
              ?capture:(opt_map Js.bool use_capture)
              ?passive:(opt_map Js.bool passive) target
              (fun (ev : #Dom_html.event Js.t) ~dx ~dy ->
-               Firebug.console##log ev;
+               Console.console##log ev;
                cancel ();
                resolve (ev, (dx, dy));
                Js.bool true)
-             (* true because we do not want to prevent default ->
+          (* true because we do not want to prevent default ->
                                the user can use the preventDefault function
                                above. *));
       cancel)
@@ -605,7 +605,7 @@ let request_animation_frame () =
   Eio_js_backend.await
     ~setup:(fun ~resolve ~reject:_ ->
       Dom_html.window##requestAnimationFrame
-        (Js.wrap_callback (fun (_ : float) -> resolve ())))
+        (Js.wrap_callback (fun _ -> resolve ())))
     ~cancel:(fun id -> Dom_html.window##cancelAnimationFrame id)
 
 let onload () = make_event Dom_html.Event.load Dom_html.window
