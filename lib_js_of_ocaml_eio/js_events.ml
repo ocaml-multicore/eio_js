@@ -331,7 +331,7 @@ let mousewheel ?use_capture ?passive target =
                cancel ();
                resolve (ev, (dx, dy));
                Js.bool true)
-             (* true because we do not want to prevent default ->
+          (* true because we do not want to prevent default ->
                                the user can use the preventDefault function
                                above. *));
       cancel)

@@ -133,8 +133,11 @@ let start main =
             !uncaught_exception_handler ex bt;
             Scheduler.next ());
         effc =
-          (fun (type a) (e : a Effect.t) :
-               ((a, suspend) Effect.Deep.continuation -> suspend) option ->
+          (fun (type a)
+            (e : a Effect.t)
+            :
+            ((a, suspend) Effect.Deep.continuation -> suspend) option
+          ->
             match e with
             | Eio.Private.Effects.Suspend f ->
                 Some
