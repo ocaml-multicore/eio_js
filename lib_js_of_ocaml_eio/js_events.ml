@@ -605,7 +605,7 @@ let request_animation_frame () =
   Eio_js_backend.await
     ~setup:(fun ~resolve ~reject:_ ->
       Dom_html.window##requestAnimationFrame
-        (Js.wrap_callback (fun (_ : float) -> resolve ())))
+        (Js.wrap_callback (fun _ -> resolve ())))
     ~cancel:(fun id -> Dom_html.window##cancelAnimationFrame id)
 
 let onload () = make_event Dom_html.Event.load Dom_html.window
