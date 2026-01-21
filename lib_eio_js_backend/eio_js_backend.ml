@@ -88,9 +88,12 @@ end = struct
 
   let next () =
     assert !active;
-    match Run_queue.pop run_queue with Some fn -> fn () | None -> Suspend
+    match Run_queue.pop run_queue with
+    | Some fn -> fn ()
+    | None -> Suspend
 
-  let resume_if_needed () = if not !active then resume next
+  let resume_if_needed () =
+    if not !active then resume next
 
   let enqueue_thread k v =
     Run_queue.push run_queue (fun () -> Suspended.continue k v);
@@ -108,8 +111,8 @@ end = struct
 end
 
 let default_uncaught_exception_handler exn raw_backtrace =
-  Printexc.default_uncaught_exception_handler exn raw_backtrace;
-  exit 2
+  Printexc.default_uncaught_exception_handler exn raw_backtrace
+  (* Don't call exit in JavaScript - it's not implemented and would block the scheduler *)
 
 let uncaught_exception_handler = ref default_uncaught_exception_handler
 let set_uncaught_exception_handler fn = uncaught_exception_handler := fn

@@ -22,6 +22,9 @@ open Js_of_ocaml
 open Js
 open XmlHttpRequest
 
+(* Keep a reference to pending requests to prevent GC *)
+let pending_requests : xmlHttpRequest t list ref = ref []
+
 let encode_url l =
   String.concat "&"
     (List.map
@@ -177,6 +180,11 @@ let perform_raw ?(headers = []) ?content_type ?(get_args = [])
   Eio_js_backend.await
     ~setup:(fun ~resolve ~reject ->
       let req = create () in
+      (* Keep reference to prevent GC *)
+      pending_requests := req :: !pending_requests;
+      let remove_from_pending () =
+        pending_requests := List.filter (fun r -> r != req) !pending_requests
+      in
       req##_open (Js.string method_) (Js.string url) Js._true;
       (match override_mime_type with
       | None -> ()
@@ -224,6 +232,7 @@ let perform_raw ?(headers = []) ?content_type ?(get_args = [])
                  http://msdn.microsoft.com/en-us/library/ms534361(v=vs.85).aspx *)
             | HEADERS_RECEIVED -> ignore (do_check_headers ())
             | DONE ->
+                remove_from_pending ();
                 (* If we didn't catch a previous event, we check the header. *)
                 if do_check_headers () then
                   let response : resptype generic_http_frame =

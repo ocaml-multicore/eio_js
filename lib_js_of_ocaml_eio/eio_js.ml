@@ -1,4 +1,4 @@
-let start = Eio_js_backend.start
+let start main = Eio_js_backend.start main
 
 let sleep d =
   Eio_js_backend.await
