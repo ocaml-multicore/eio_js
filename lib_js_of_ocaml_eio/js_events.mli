@@ -22,27 +22,29 @@
 
 open Js_of_ocaml
 
-(**
-   Reminder:
-   Event capturing starts with the outer most element in the DOM and
-   works inwards to the HTML element the event took place on (capture phase)
-   and then out again (bubbling phase).
+exception Cancelled
 
-   Examples of use:
+(** Reminder: Event capturing starts with the outer most element in the DOM and
+    works inwards to the HTML element the event took place on (capture phase)
+    and then out again (bubbling phase).
 
-   Waiting for a click on [elt1] before continuing:
+    Examples of use:
 
-   {[Eio_js_events.click elt1]}
+    Waiting for a click on [elt1] before continuing:
 
-   Defining a thread that waits for ESC key on an element:
+    {[
+      Eio_js_events.click elt1
+    ]}
 
-   {[let rec esc elt =
-      let ev = keydown elt in
-      if ev##.keyCode = 27
-      then Lwt.return ev
-      else esc elt]}
+    Defining a thread that waits for ESC key on an element:
 
-  {2 Create Eio fibers for events} *)
+    {[
+      let rec esc elt =
+        let ev = keydown elt in
+        if ev##.keyCode = 27 then Lwt.return ev else esc elt
+    ]}
+
+    {2 Create Eio fibers for events} *)
 
 val make_event :
   (#Dom_html.event as 'a) Js.t Dom_html.Event.typ ->
@@ -50,64 +52,56 @@ val make_event :
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
   'a Js.t
-(** [make_event ev target] creates an Eio fiber that waits
-    for the event [ev] to happen on [target] (once).
-    This thread isa cancellable.
-    If you set the optional parameter [~use_capture:true],
-    the event will be caught during the capture phase,
-    otherwise it is caught during the bubbling phase
-    (default).
-    If you set the optional parameter [~passive:true],
-    the user agent will ignore [preventDefault] calls
-    inside the event callback.
-*)
+(** [make_event ev target] waits for the event [ev] to
+    happen on [target] (once). 
+    You can cancel the binding by cancelling the switch in
+    which it runs. If you set the
+    optional parameter [~use_capture:true], the event will be caught during the
+    capture phase, otherwise it is caught during the bubbling phase (default).
+    If you set the optional parameter [~passive:true], the user agent will
+    ignore [preventDefault] calls inside the event callback. *)
 
-type cancel = { cancel : unit -> unit }
 
 val seq_loop :
-  sw:Eio.Switch.t ->
   (?use_capture:bool -> ?passive:bool -> 'target -> 'event) ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   'target ->
-  ('event -> cancel -> unit) ->
-  cancel
-(** [seq_loop (make_event ev) target handler] creates a looping Eio
-    fiber that waits for the event [ev] to happen on [target], then
-    execute [handler], and start again waiting for the event. Events
-    happening during the execution of the handler are ignored. See
-    [async_loop] and [buffered_loop] for alternative semantics.
+  ('event -> unit) ->
+  unit
+(** [seq_loop (make_event ev) target handler] creates a looping Eio fiber that
+    waits for the event [ev] to happen on [target], then execute [handler], and
+    start again waiting for the event. Events happening during the execution of
+    the handler are ignored. See [async_loop] and [buffered_loop] for
+    alternative semantics.
 
     For example, the [clicks] function below is defined by:
 
-    [let clicks ?use_capture ?passive t = seq_loop click ?use_capture ?passive t]
+    [let clicks ?use_capture ?passive t = seq_loop click ?use_capture ?passive
+     t]
 
-    The loop can be cancelled by calling the returned [cancel] function.
-    In order for the loop to be canceled from within the handler,
-    the handler also receives the function as its second parameter.
+    The loop can be cancelled by cancelling the switch in which it runs.
 
-    By default, cancelling the loop will not cancel the potential
-    currently running handler. This behaviour can be changed by
-    setting the [cancel_handler] parameter to true.
-*)
+    By default, cancelling the loop will not cancel the potential currently
+    running handler. This behaviour can be changed by setting the
+    [cancel_handler] parameter to true. *)
 
 val async_loop :
-  sw:Eio.Switch.t ->
   (?use_capture:bool -> ?passive:bool -> 'target -> 'event) ->
+  ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   'target ->
-  ('event -> cancel -> unit) ->
-  cancel
-(** [async_loop] is similar to [seq_loop], but each handler runs
-    independently. No event is thus missed, but since several
-    instances of the handler can be run concurrently, it is up to the
-    programmer to ensure that they interact correctly.
+  ('event -> unit) ->
+  unit
+(** [async_loop] is similar to [seq_loop], but each handler runs independently.
+    No event is thus missed, but since several instances of the handler can be
+    run concurrently, it is up to the programmer to ensure that they interact
+    correctly.
 
     Cancelling the loop will not cancel the potential currently running
-    handlers.
-*)
+    handlers. *)
 
 (*
 val buffered_loop :
@@ -136,28 +130,25 @@ val buffered_loop :
     parameters [cancel_handler] and [cancel_queue].
 *)
 *)
-val async : sw:Eio.Switch.t -> (unit -> unit) -> unit
-(** [async t] records a thread to be executed later.
-    It is implemented by forking a fiber that immediately calls [Eio_js.yield].
-    This is useful if you want to create a new event listener
-    when you are inside an event handler.
-    This avoids the current event to be caught by the new event handler
-    (if it propagates).
-*)
+val async : (unit -> unit) -> unit
+(** [async t] records a thread to be executed later. It is implemented by
+    forking a fiber that immediately calls [Eio_js.yield]. This is useful if you
+    want to create a new event listener when you are inside an event handler.
+    This avoids the current event to be caught by the new event handler (if it
+    propagates). *)
 
 val func_limited_loop :
-  sw:Eio.Switch.t ->
   (?use_capture:bool -> ?passive:bool -> 'a -> 'b) ->
   (unit -> unit) ->
   ?use_capture:bool ->
   ?passive:bool ->
   'a ->
-  ('b -> cancel -> unit) ->
-  cancel
+  ('b -> unit) ->
+  unit
 (** [func_limited_loop event delay_fun target handler] will behave like
-    [Lwt_js_events.async_loop event target handler] but it will run [delay_fun]
-    first, and execute [handler] only when [delay_fun] is finished and
-    no other event occurred in the meantime.
+    [async_loop event target handler] but it will run [delay_fun] first, and
+    execute [handler] only when [delay_fun] is finished and no other event
+    occurred in the meantime.
 
     This allows to limit the number of events caught.
 
@@ -165,18 +156,17 @@ val func_limited_loop :
     several instances of your handler could be run in same time **)
 
 val limited_loop :
-  sw:Eio.Switch.t ->
   (?use_capture:bool -> ?passive:bool -> 'a -> 'b) ->
   ?elapsed_time:float ->
   ?use_capture:bool ->
   ?passive:bool ->
   'a ->
-  ('b -> cancel -> unit) ->
-  cancel
-(** Same as func_limited_loop but take time instead of function
-    By default elapsed_time = 0.1s = 100ms **)
+  ('b -> unit) ->
+  unit
+(** Same as func_limited_loop but take time instead of function By default
+    elapsed_time = 0.1s = 100ms **)
 
-(**  {2 Predefined functions for some types of events} *)
+(** {2 Predefined functions for some types of events} *)
 
 val click :
   ?use_capture:bool ->
@@ -351,10 +341,9 @@ val mousewheel :
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
   Dom_html.mouseEvent Js.t * (int * int)
-(** This function returns the event,
-    together with the numbers of ticks the mouse wheel moved.
-    Positive means down or right.
-    This interface is compatible with all (recent) browsers. *)
+(** This function returns the event, together with the numbers of ticks the
+    mouse wheel moved. Positive means down or right. This interface is
+    compatible with all (recent) browsers. *)
 
 val wheel :
   ?use_capture:bool ->
@@ -598,629 +587,560 @@ val waiting :
   Dom_html.event Js.t
 
 val clicks :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val copies :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.clipboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.clipboardEvent Js.t  -> unit) ->
+  unit
 
 val cuts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.clipboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.clipboardEvent Js.t  -> unit) ->
+  unit
 
 val pastes :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.clipboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.clipboardEvent Js.t  -> unit) ->
+  unit
 
 val dblclicks :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val mousedowns :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val mouseups :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val mouseovers :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val mousemoves :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val mouseouts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t  -> unit) ->
+  unit
 
 val keypresses :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.keyboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.keyboardEvent Js.t  -> unit) ->
+  unit
 
 val keydowns :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.keyboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.keyboardEvent Js.t  -> unit) ->
+  unit
 
 val keyups :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.keyboardEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.keyboardEvent Js.t  -> unit) ->
+  unit
 
 val inputs :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val timeupdates :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val changes :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val dragstarts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val dragends :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val dragenters :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val dragovers :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val dragleaves :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val drags :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val drops :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.dragEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.dragEvent Js.t  -> unit) ->
+  unit
 
 val mousewheels :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mouseEvent Js.t * (int * int) -> cancel -> unit) ->
-  cancel
+  (Dom_html.mouseEvent Js.t * (int * int)  -> unit) ->
+  unit
 
 val wheels :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.mousewheelEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.mousewheelEvent Js.t  -> unit) ->
+  unit
 
 val touchstarts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.touchEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.touchEvent Js.t  -> unit) ->
+  unit
 
 val touchmoves :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.touchEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.touchEvent Js.t  -> unit) ->
+  unit
 
 val touchends :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.touchEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.touchEvent Js.t  -> unit) ->
+  unit
 
 val touchcancels :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.touchEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.touchEvent Js.t  -> unit) ->
+  unit
 
 val focuses :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.focusEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.focusEvent Js.t  -> unit) ->
+  unit
 
 val blurs :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.focusEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.focusEvent Js.t  -> unit) ->
+  unit
 
 val scrolls :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val submits :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.submitEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.submitEvent Js.t  -> unit) ->
+  unit
 
 val selects :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val loads :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.imageElement Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val errors :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.imageElement Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val aborts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.imageElement Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val canplays :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val canplaythroughs :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val durationchanges :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val emptieds :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val endeds :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val loadeddatas :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val loadedmetadatas :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val loadstarts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val pauses :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val plays :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val playings :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val ratechanges :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val seekeds :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val seekings :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val stalleds :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val suspends :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val volumechanges :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val waitings :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.event Js.t  -> unit) ->
+  unit
 
 val lostpointercaptures :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val gotpointercaptures :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerenters :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointercancels :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerdowns :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerleaves :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointermoves :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerouts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerovers :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val pointerups :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.pointerEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.pointerEvent Js.t  -> unit) ->
+  unit
 
 val transitionends :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.transitionEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.transitionEvent Js.t  -> unit) ->
+  unit
 
 val transitionstarts :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.transitionEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.transitionEvent Js.t  -> unit) ->
+  unit
 
 val transitionruns :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.transitionEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.transitionEvent Js.t  -> unit) ->
+  unit
 
 val transitioncancels :
-  sw:Eio.Switch.t ->
   ?cancel_handler:bool ->
   ?use_capture:bool ->
   ?passive:bool ->
   #Dom_html.eventTarget Js.t ->
-  (Dom_html.transitionEvent Js.t -> cancel -> unit) ->
-  cancel
+  (Dom_html.transitionEvent Js.t  -> unit) ->
+  unit
 
 val request_animation_frame : unit -> unit
-(** Returns when a repaint of the window by the browser starts.
-    (see JS method [window.requestAnimationFrame]) *)
+(** Returns when a repaint of the window by the browser starts. (see JS method
+    [window.requestAnimationFrame]) *)
 
 val onload : unit -> Dom_html.event Js.t
 (** Returns when the page is loaded *)
@@ -1233,36 +1153,19 @@ val onorientationchange : unit -> Dom_html.event Js.t
 val onpopstate : unit -> Dom_html.popStateEvent Js.t
 val onhashchange : unit -> Dom_html.hashChangeEvent Js.t
 val onorientationchange_or_onresize : unit -> Dom_html.event Js.t
-
-val onresizes :
-  sw:Eio.Switch.t -> (Dom_html.event Js.t -> cancel -> unit) -> cancel
-
-val onorientationchanges :
-  sw:Eio.Switch.t -> (Dom_html.event Js.t -> cancel -> unit) -> cancel
-
-val onpopstates :
-  sw:Eio.Switch.t -> (Dom_html.popStateEvent Js.t -> cancel -> unit) -> cancel
-
-val onhashchanges :
-  sw:Eio.Switch.t -> (Dom_html.hashChangeEvent Js.t -> cancel -> unit) -> cancel
+val onresizes : (Dom_html.event Js.t  -> unit) -> unit
+val onorientationchanges : (Dom_html.event Js.t  -> unit) -> unit
+val onpopstates : (Dom_html.popStateEvent Js.t  -> unit) -> unit
+val onhashchanges : (Dom_html.hashChangeEvent Js.t  -> unit) -> unit
 
 val onorientationchanges_or_onresizes :
-  sw:Eio.Switch.t -> (Dom_html.event Js.t -> cancel -> unit) -> cancel
+  (Dom_html.event Js.t  -> unit) -> unit
 
 val limited_onresizes :
-  sw:Eio.Switch.t ->
-  ?elapsed_time:float ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  ?elapsed_time:float -> (Dom_html.event Js.t  -> unit) -> unit
 
 val limited_onorientationchanges :
-  sw:Eio.Switch.t ->
-  ?elapsed_time:float ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  ?elapsed_time:float -> (Dom_html.event Js.t  -> unit) -> unit
 
 val limited_onorientationchanges_or_onresizes :
-  sw:Eio.Switch.t ->
-  ?elapsed_time:float ->
-  (Dom_html.event Js.t -> cancel -> unit) ->
-  cancel
+  ?elapsed_time:float -> (Dom_html.event Js.t  -> unit) -> unit

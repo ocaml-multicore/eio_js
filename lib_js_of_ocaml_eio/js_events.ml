@@ -20,8 +20,10 @@
 
 open Js_of_ocaml
 
-let async ~sw f =
-  Eio.Fiber.fork ~sw @@ fun () ->
+exception Cancelled
+
+let async f =
+  Eio_js.start @@ fun () ->
   Eio_js.yield ();
   f ()
 
@@ -47,126 +49,57 @@ let make_event event_kind ?use_capture ?passive target =
       cancel)
     ~cancel:(fun cancel -> cancel ())
 
-type cancel = { cancel : unit -> unit }
+
 
 let with_error_log f x =
-  try f x with e -> Firebug.console##log (Js.string (Printexc.to_string e))
+  try f x with e -> Console.console##log (Js.string (Printexc.to_string e))
 
-let seq_loop ~sw evh ?(cancel_handler = false) ?use_capture ?passive target
+let seq_loop evh ?(cancel_handler = false) ?use_capture ?passive target handler
+    =
+  if cancel_handler then
+    let rec aux () =
+      let e = evh ?use_capture ?passive target in
+      with_error_log handler e;
+      aux ()
+    in
+    aux ()
+  else
+    let rec aux () =
+      let e = evh ?use_capture ?passive target in
+      Eio.Promise.await_exn
+        (Eio.Switch.run_protected (fun sw ->
+             Eio.Fiber.fork_promise ~sw (fun () ->
+                 with_error_log handler e)));
+      Eio.Fiber.yield ();
+      (* Without yield, the fiber will never be cancelled *)
+      aux ()
+    in
+    aux ()
+
+let async_loop evh ?(cancel_handler = false) ?use_capture ?passive target
     handler =
-  let cancel, cancel_resolver = Eio.Promise.create () in
-  let wait_for_cancellation () = Eio.Promise.await cancel in
-  let cancel =
-    { cancel = (fun () -> Eio.Promise.resolve cancel_resolver ()) }
-  in
-  (if cancel_handler then
-     let rec aux () =
-       let e = evh ?use_capture ?passive target in
-       with_error_log (handler e) cancel;
-       aux ()
-     in
-     Eio.Fiber.fork ~sw (fun () -> Eio.Fiber.first wait_for_cancellation aux)
-   else
-     let rec aux () =
-       let e =
-         Eio.Fiber.first
-           (fun () ->
-             wait_for_cancellation ();
-             None)
-           (fun () -> Some (evh ?use_capture ?passive target))
-       in
-       Option.iter
-         (fun e ->
-           with_error_log (handler e) cancel;
-           aux ())
-         e
-     in
-     Eio.Fiber.fork ~sw aux);
-  cancel
-
-let async_loop ~sw evh ?use_capture ?passive target handler =
-  let cancel, cancel_resolver = Eio.Promise.create () in
-  let wait_for_cancellation () = Eio.Promise.await cancel in
-  let cancel =
-    { cancel = (fun () -> Eio.Promise.resolve cancel_resolver ()) }
+  let switch_run =
+    if cancel_handler then Eio.Switch.run else Eio.Switch.run_protected
   in
   let rec aux () =
-    let e =
-      Eio.Fiber.first
-        (fun () ->
-          wait_for_cancellation ();
-          None)
-        (fun () -> Some (evh ?use_capture ?passive target))
-    in
-    Option.iter
-      (fun e ->
-        Eio.Fiber.fork ~sw (fun () -> with_error_log (handler e) cancel);
-        aux ())
-      e
+    let e = evh ?use_capture ?passive target in
+    switch_run (fun sw ->
+        Eio.Fiber.fork ~sw (fun () -> with_error_log handler e));
+    Eio.Fiber.yield ();
+    aux ()
   in
-  Eio.Fiber.fork ~sw aux;
-  cancel
+  aux ()
 
-(*
-let buffered_loop
-    evh
-    ?(cancel_handler = false)
-    ?(cancel_queue = true)
-    ?use_capture
-    ?passive
-    target
-    handler =
-  let cancelled = ref false in
-  let queue = ref [] in
-  let cur = ref (Lwt.fail (Failure "Lwt_js_event")) in
-  let cur_handler = ref (Lwt.return ()) in
-  let lt, _lw = Lwt.task () in
-  let spawn = Lwt_condition.create () in
-  Lwt.on_cancel lt (fun () ->
-      Lwt.cancel !cur;
-      if cancel_handler then Lwt.cancel !cur_handler;
-      if cancel_queue then queue := [];
-      cancelled := true);
-  let rec spawner () =
-    if not !cancelled
-    then (
-      let t = evh ?use_capture ?passive target in
-      cur := t;
-      t
-      >>= fun e ->
-      queue := e :: !queue;
-      Lwt_condition.signal spawn ();
-      spawner ())
-    else Lwt.return ()
-  in
-  let rec runner () =
-    cur_handler := Lwt.return ();
-    if not !cancelled
-    then (
-      match !queue with
-      | [] -> Lwt_condition.wait spawn >>= runner
-      | e :: tl ->
-          queue := tl;
-          cur_handler := with_error_log (handler e) lt;
-          !cur_handler >>= runner)
-    else Lwt.return ()
-  in
-  Lwt.async (catch_cancel spawner);
-  Lwt.async runner;
-  lt
-*)
-
-let func_limited_loop ~sw event limited_func ?use_capture ?passive target
-    handler =
+let func_limited_loop event limited_func ?use_capture ?passive target handler =
   let count = ref 0 in
-  async_loop ~sw event ?use_capture ?passive target (fun ev lt ->
+  async_loop event ?use_capture ?passive target (fun ev ->
       incr count;
       let nb = !count in
       limited_func ();
-      if !count = nb then handler ev lt)
+      if !count = nb then handler ev)
 
-let limited_loop ~sw event ?(elapsed_time = 0.1) =
-  func_limited_loop ~sw event (fun () -> Eio_js.sleep elapsed_time)
+let limited_loop event ?(elapsed_time = 0.1) =
+  func_limited_loop event (fun () -> Eio_js.sleep elapsed_time)
 
 let click ?use_capture ?passive target =
   make_event Dom_html.Event.click ?use_capture ?passive target
@@ -327,11 +260,11 @@ let mousewheel ?use_capture ?passive target =
              ?capture:(opt_map Js.bool use_capture)
              ?passive:(opt_map Js.bool passive) target
              (fun (ev : #Dom_html.event Js.t) ~dx ~dy ->
-               Firebug.console##log ev;
+               Console.console##log ev;
                cancel ();
                resolve (ev, (dx, dy));
                Js.bool true)
-             (* true because we do not want to prevent default ->
+          (* true because we do not want to prevent default ->
                                the user can use the preventDefault function
                                above. *));
       cancel)
@@ -394,218 +327,218 @@ let transitionrun ?use_capture ?passive elt =
 let transitioncancel ?use_capture ?passive elt =
   make_event Dom_html.Event.transitioncancel ?use_capture ?passive elt
 
-let clicks ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw click ?cancel_handler ?use_capture ?passive t
+let clicks ?cancel_handler ?use_capture ?passive t =
+  seq_loop click ?cancel_handler ?use_capture ?passive t
 
-let copies ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw copy ?cancel_handler ?use_capture ?passive t
+let copies ?cancel_handler ?use_capture ?passive t =
+  seq_loop copy ?cancel_handler ?use_capture ?passive t
 
-let cuts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw cut ?cancel_handler ?use_capture ?passive t
+let cuts ?cancel_handler ?use_capture ?passive t =
+  seq_loop cut ?cancel_handler ?use_capture ?passive t
 
-let pastes ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw paste ?cancel_handler ?use_capture ?passive t
+let pastes ?cancel_handler ?use_capture ?passive t =
+  seq_loop paste ?cancel_handler ?use_capture ?passive t
 
-let dblclicks ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dblclick ?cancel_handler ?use_capture ?passive t
+let dblclicks ?cancel_handler ?use_capture ?passive t =
+  seq_loop dblclick ?cancel_handler ?use_capture ?passive t
 
-let mousedowns ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mousedown ?cancel_handler ?use_capture ?passive t
+let mousedowns ?cancel_handler ?use_capture ?passive t =
+  seq_loop mousedown ?cancel_handler ?use_capture ?passive t
 
-let mouseups ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mouseup ?cancel_handler ?use_capture ?passive t
+let mouseups ?cancel_handler ?use_capture ?passive t =
+  seq_loop mouseup ?cancel_handler ?use_capture ?passive t
 
-let mouseovers ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mouseover ?cancel_handler ?use_capture ?passive t
+let mouseovers ?cancel_handler ?use_capture ?passive t =
+  seq_loop mouseover ?cancel_handler ?use_capture ?passive t
 
-let mousemoves ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mousemove ?cancel_handler ?use_capture ?passive t
+let mousemoves ?cancel_handler ?use_capture ?passive t =
+  seq_loop mousemove ?cancel_handler ?use_capture ?passive t
 
-let mouseouts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mouseout ?cancel_handler ?use_capture ?passive t
+let mouseouts ?cancel_handler ?use_capture ?passive t =
+  seq_loop mouseout ?cancel_handler ?use_capture ?passive t
 
-let keypresses ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw keypress ?cancel_handler ?use_capture ?passive t
+let keypresses ?cancel_handler ?use_capture ?passive t =
+  seq_loop keypress ?cancel_handler ?use_capture ?passive t
 
-let keydowns ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw keydown ?cancel_handler ?use_capture ?passive t
+let keydowns ?cancel_handler ?use_capture ?passive t =
+  seq_loop keydown ?cancel_handler ?use_capture ?passive t
 
-let keyups ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw keyup ?cancel_handler ?use_capture ?passive t
+let keyups ?cancel_handler ?use_capture ?passive t =
+  seq_loop keyup ?cancel_handler ?use_capture ?passive t
 
-let changes ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw change ?cancel_handler ?use_capture ?passive t
+let changes ?cancel_handler ?use_capture ?passive t =
+  seq_loop change ?cancel_handler ?use_capture ?passive t
 
-let inputs ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw input ?cancel_handler ?use_capture ?passive t
+let inputs ?cancel_handler ?use_capture ?passive t =
+  seq_loop input ?cancel_handler ?use_capture ?passive t
 
-let timeupdates ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw timeupdate ?cancel_handler ?use_capture ?passive t
+let timeupdates ?cancel_handler ?use_capture ?passive t =
+  seq_loop timeupdate ?cancel_handler ?use_capture ?passive t
 
-let dragstarts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dragstart ?cancel_handler ?use_capture ?passive t
+let dragstarts ?cancel_handler ?use_capture ?passive t =
+  seq_loop dragstart ?cancel_handler ?use_capture ?passive t
 
-let dragends ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dragend ?cancel_handler ?use_capture ?passive t
+let dragends ?cancel_handler ?use_capture ?passive t =
+  seq_loop dragend ?cancel_handler ?use_capture ?passive t
 
-let dragenters ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dragenter ?cancel_handler ?use_capture ?passive t
+let dragenters ?cancel_handler ?use_capture ?passive t =
+  seq_loop dragenter ?cancel_handler ?use_capture ?passive t
 
-let dragovers ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dragover ?cancel_handler ?use_capture ?passive t
+let dragovers ?cancel_handler ?use_capture ?passive t =
+  seq_loop dragover ?cancel_handler ?use_capture ?passive t
 
-let dragleaves ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw dragleave ?cancel_handler ?use_capture ?passive t
+let dragleaves ?cancel_handler ?use_capture ?passive t =
+  seq_loop dragleave ?cancel_handler ?use_capture ?passive t
 
-let drags ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw drag ?cancel_handler ?use_capture ?passive t
+let drags ?cancel_handler ?use_capture ?passive t =
+  seq_loop drag ?cancel_handler ?use_capture ?passive t
 
-let drops ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw drop ?cancel_handler ?use_capture ?passive t
+let drops ?cancel_handler ?use_capture ?passive t =
+  seq_loop drop ?cancel_handler ?use_capture ?passive t
 
-let mousewheels ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw mousewheel ?cancel_handler ?use_capture ?passive t
+let mousewheels ?cancel_handler ?use_capture ?passive t =
+  seq_loop mousewheel ?cancel_handler ?use_capture ?passive t
 
-let wheels ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw wheel ?cancel_handler ?use_capture ?passive t
+let wheels ?cancel_handler ?use_capture ?passive t =
+  seq_loop wheel ?cancel_handler ?use_capture ?passive t
 
-let touchstarts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw touchstart ?cancel_handler ?use_capture ?passive t
+let touchstarts ?cancel_handler ?use_capture ?passive t =
+  seq_loop touchstart ?cancel_handler ?use_capture ?passive t
 
-let touchmoves ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw touchmove ?cancel_handler ?use_capture ?passive t
+let touchmoves ?cancel_handler ?use_capture ?passive t =
+  seq_loop touchmove ?cancel_handler ?use_capture ?passive t
 
-let touchends ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw touchend ?cancel_handler ?use_capture ?passive t
+let touchends ?cancel_handler ?use_capture ?passive t =
+  seq_loop touchend ?cancel_handler ?use_capture ?passive t
 
-let touchcancels ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw touchcancel ?cancel_handler ?use_capture ?passive t
+let touchcancels ?cancel_handler ?use_capture ?passive t =
+  seq_loop touchcancel ?cancel_handler ?use_capture ?passive t
 
-let focuses ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw focus ?cancel_handler ?use_capture ?passive t
+let focuses ?cancel_handler ?use_capture ?passive t =
+  seq_loop focus ?cancel_handler ?use_capture ?passive t
 
-let blurs ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw blur ?cancel_handler ?use_capture ?passive t
+let blurs ?cancel_handler ?use_capture ?passive t =
+  seq_loop blur ?cancel_handler ?use_capture ?passive t
 
-let scrolls ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw scroll ?cancel_handler ?use_capture ?passive t
+let scrolls ?cancel_handler ?use_capture ?passive t =
+  seq_loop scroll ?cancel_handler ?use_capture ?passive t
 
-let submits ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw submit ?cancel_handler ?use_capture ?passive t
+let submits ?cancel_handler ?use_capture ?passive t =
+  seq_loop submit ?cancel_handler ?use_capture ?passive t
 
-let selects ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw select ?cancel_handler ?use_capture ?passive t
+let selects ?cancel_handler ?use_capture ?passive t =
+  seq_loop select ?cancel_handler ?use_capture ?passive t
 
-let aborts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw abort ?cancel_handler ?use_capture ?passive t
+let aborts ?cancel_handler ?use_capture ?passive t =
+  seq_loop abort ?cancel_handler ?use_capture ?passive t
 
-let errors ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw error ?cancel_handler ?use_capture ?passive t
+let errors ?cancel_handler ?use_capture ?passive t =
+  seq_loop error ?cancel_handler ?use_capture ?passive t
 
-let loads ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw load ?cancel_handler ?use_capture ?passive t
+let loads ?cancel_handler ?use_capture ?passive t =
+  seq_loop load ?cancel_handler ?use_capture ?passive t
 
-let canplays ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw canplay ?cancel_handler ?use_capture ?passive t
+let canplays ?cancel_handler ?use_capture ?passive t =
+  seq_loop canplay ?cancel_handler ?use_capture ?passive t
 
-let canplaythroughs ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw canplaythrough ?cancel_handler ?use_capture ?passive t
+let canplaythroughs ?cancel_handler ?use_capture ?passive t =
+  seq_loop canplaythrough ?cancel_handler ?use_capture ?passive t
 
-let durationchanges ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw durationchange ?cancel_handler ?use_capture ?passive t
+let durationchanges ?cancel_handler ?use_capture ?passive t =
+  seq_loop durationchange ?cancel_handler ?use_capture ?passive t
 
-let emptieds ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw emptied ?cancel_handler ?use_capture ?passive t
+let emptieds ?cancel_handler ?use_capture ?passive t =
+  seq_loop emptied ?cancel_handler ?use_capture ?passive t
 
-let endeds ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw ended ?cancel_handler ?use_capture ?passive t
+let endeds ?cancel_handler ?use_capture ?passive t =
+  seq_loop ended ?cancel_handler ?use_capture ?passive t
 
-let loadeddatas ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw loadeddata ?cancel_handler ?use_capture ?passive t
+let loadeddatas ?cancel_handler ?use_capture ?passive t =
+  seq_loop loadeddata ?cancel_handler ?use_capture ?passive t
 
-let loadedmetadatas ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw loadedmetadata ?cancel_handler ?use_capture ?passive t
+let loadedmetadatas ?cancel_handler ?use_capture ?passive t =
+  seq_loop loadedmetadata ?cancel_handler ?use_capture ?passive t
 
-let loadstarts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw loadstart ?cancel_handler ?use_capture ?passive t
+let loadstarts ?cancel_handler ?use_capture ?passive t =
+  seq_loop loadstart ?cancel_handler ?use_capture ?passive t
 
-let pauses ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pause ?cancel_handler ?use_capture ?passive t
+let pauses ?cancel_handler ?use_capture ?passive t =
+  seq_loop pause ?cancel_handler ?use_capture ?passive t
 
-let plays ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw play ?cancel_handler ?use_capture ?passive t
+let plays ?cancel_handler ?use_capture ?passive t =
+  seq_loop play ?cancel_handler ?use_capture ?passive t
 
-let playings ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw playing ?cancel_handler ?use_capture ?passive t
+let playings ?cancel_handler ?use_capture ?passive t =
+  seq_loop playing ?cancel_handler ?use_capture ?passive t
 
-let ratechanges ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw ratechange ?cancel_handler ?use_capture ?passive t
+let ratechanges ?cancel_handler ?use_capture ?passive t =
+  seq_loop ratechange ?cancel_handler ?use_capture ?passive t
 
-let seekeds ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw seeked ?cancel_handler ?use_capture ?passive t
+let seekeds ?cancel_handler ?use_capture ?passive t =
+  seq_loop seeked ?cancel_handler ?use_capture ?passive t
 
-let seekings ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw seeking ?cancel_handler ?use_capture ?passive t
+let seekings ?cancel_handler ?use_capture ?passive t =
+  seq_loop seeking ?cancel_handler ?use_capture ?passive t
 
-let stalleds ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw stalled ?cancel_handler ?use_capture ?passive t
+let stalleds ?cancel_handler ?use_capture ?passive t =
+  seq_loop stalled ?cancel_handler ?use_capture ?passive t
 
-let suspends ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw suspend ?cancel_handler ?use_capture ?passive t
+let suspends ?cancel_handler ?use_capture ?passive t =
+  seq_loop suspend ?cancel_handler ?use_capture ?passive t
 
-let volumechanges ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw volumechange ?cancel_handler ?use_capture ?passive t
+let volumechanges ?cancel_handler ?use_capture ?passive t =
+  seq_loop volumechange ?cancel_handler ?use_capture ?passive t
 
-let waitings ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw waiting ?cancel_handler ?use_capture ?passive t
+let waitings ?cancel_handler ?use_capture ?passive t =
+  seq_loop waiting ?cancel_handler ?use_capture ?passive t
 
-let lostpointercaptures ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw lostpointercapture ?cancel_handler ?use_capture ?passive t
+let lostpointercaptures ?cancel_handler ?use_capture ?passive t =
+  seq_loop lostpointercapture ?cancel_handler ?use_capture ?passive t
 
-let gotpointercaptures ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw gotpointercapture ?cancel_handler ?use_capture ?passive t
+let gotpointercaptures ?cancel_handler ?use_capture ?passive t =
+  seq_loop gotpointercapture ?cancel_handler ?use_capture ?passive t
 
-let pointerenters ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerenter ?cancel_handler ?use_capture ?passive t
+let pointerenters ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerenter ?cancel_handler ?use_capture ?passive t
 
-let pointercancels ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointercancel ?cancel_handler ?use_capture ?passive t
+let pointercancels ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointercancel ?cancel_handler ?use_capture ?passive t
 
-let pointerdowns ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerdown ?cancel_handler ?use_capture ?passive t
+let pointerdowns ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerdown ?cancel_handler ?use_capture ?passive t
 
-let pointerleaves ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerleave ?cancel_handler ?use_capture ?passive t
+let pointerleaves ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerleave ?cancel_handler ?use_capture ?passive t
 
-let pointermoves ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointermove ?cancel_handler ?use_capture ?passive t
+let pointermoves ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointermove ?cancel_handler ?use_capture ?passive t
 
-let pointerouts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerout ?cancel_handler ?use_capture ?passive t
+let pointerouts ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerout ?cancel_handler ?use_capture ?passive t
 
-let pointerovers ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerover ?cancel_handler ?use_capture ?passive t
+let pointerovers ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerover ?cancel_handler ?use_capture ?passive t
 
-let pointerups ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw pointerup ?cancel_handler ?use_capture ?passive t
+let pointerups ?cancel_handler ?use_capture ?passive t =
+  seq_loop pointerup ?cancel_handler ?use_capture ?passive t
 
-let transitionends ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw transitionend ?cancel_handler ?use_capture ?passive t
+let transitionends ?cancel_handler ?use_capture ?passive t =
+  seq_loop transitionend ?cancel_handler ?use_capture ?passive t
 
-let transitionstarts ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw transitionstart ?cancel_handler ?use_capture ?passive t
+let transitionstarts ?cancel_handler ?use_capture ?passive t =
+  seq_loop transitionstart ?cancel_handler ?use_capture ?passive t
 
-let transitionruns ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw transitionrun ?cancel_handler ?use_capture ?passive t
+let transitionruns ?cancel_handler ?use_capture ?passive t =
+  seq_loop transitionrun ?cancel_handler ?use_capture ?passive t
 
-let transitioncancels ~sw ?cancel_handler ?use_capture ?passive t =
-  seq_loop ~sw transitioncancel ?cancel_handler ?use_capture ?passive t
+let transitioncancels ?cancel_handler ?use_capture ?passive t =
+  seq_loop transitioncancel ?cancel_handler ?use_capture ?passive t
 
 let request_animation_frame () =
   Eio_js_backend.await
     ~setup:(fun ~resolve ~reject:_ ->
       Dom_html.window##requestAnimationFrame
-        (Js.wrap_callback (fun (_ : float) -> resolve ())))
+        (Js.wrap_callback (fun _ -> resolve ())))
     ~cancel:(fun id -> Dom_html.window##cancelAnimationFrame id)
 
 let onload () = make_event Dom_html.Event.load Dom_html.window
@@ -634,34 +567,34 @@ let onhashchange () = make_event Dom_html.Event.hashchange Dom_html.window
 let onorientationchange_or_onresize () =
   Eio.Fiber.first onresize onorientationchange
 
-let onresizes ~sw t =
-  seq_loop ~sw (fun ?use_capture:_ ?passive:_ () -> onresize ()) () t
+let onresizes t =
+  seq_loop (fun ?use_capture:_ ?passive:_ () -> onresize ()) () t
 
-let onorientationchanges ~sw t =
-  seq_loop ~sw (fun ?use_capture:_ ?passive:_ () -> onorientationchange ()) () t
+let onorientationchanges t =
+  seq_loop (fun ?use_capture:_ ?passive:_ () -> onorientationchange ()) () t
 
-let onpopstates ~sw t =
-  seq_loop ~sw (fun ?use_capture:_ ?passive:_ () -> onpopstate ()) () t
+let onpopstates t =
+  seq_loop (fun ?use_capture:_ ?passive:_ () -> onpopstate ()) () t
 
-let onhashchanges ~sw t =
-  seq_loop ~sw (fun ?use_capture:_ ?passive:_ () -> onhashchange ()) () t
+let onhashchanges t =
+  seq_loop (fun ?use_capture:_ ?passive:_ () -> onhashchange ()) () t
 
-let onorientationchanges_or_onresizes ~sw t =
-  seq_loop ~sw
+let onorientationchanges_or_onresizes t =
+  seq_loop
     (fun ?use_capture:_ ?passive:_ () -> onorientationchange_or_onresize ())
     () t
 
-let limited_onresizes ~sw ?elapsed_time t =
-  limited_loop ~sw
+let limited_onresizes ?elapsed_time t =
+  limited_loop
     (fun ?use_capture:_ ?passive:_ () -> onresize ())
     ?elapsed_time () t
 
-let limited_onorientationchanges ~sw ?elapsed_time t =
-  limited_loop ~sw
+let limited_onorientationchanges ?elapsed_time t =
+  limited_loop
     (fun ?use_capture:_ ?passive:_ () -> onorientationchange ())
     ?elapsed_time () t
 
-let limited_onorientationchanges_or_onresizes ~sw ?elapsed_time t =
-  limited_loop ~sw
+let limited_onorientationchanges_or_onresizes ?elapsed_time t =
+  limited_loop
     (fun ?use_capture:_ ?passive:_ () -> onorientationchange_or_onresize ())
     ?elapsed_time () t

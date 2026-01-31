@@ -222,9 +222,7 @@ let perform_raw ?(headers = []) ?content_type ?(get_args = [])
             (* IE doesn't have the same semantics for HEADERS_RECEIVED.
                  so we wait til LOADING to check headers. See:
                  http://msdn.microsoft.com/en-us/library/ms534361(v=vs.85).aspx *)
-            | HEADERS_RECEIVED when not Dom_html.onIE ->
-                ignore (do_check_headers ())
-            | LOADING when Dom_html.onIE -> ignore (do_check_headers ())
+            | HEADERS_RECEIVED -> ignore (do_check_headers ())
             | DONE ->
                 (* If we didn't catch a previous event, we check the header. *)
                 if do_check_headers () then
@@ -247,14 +245,13 @@ let perform_raw ?(headers = []) ?content_type ?(get_args = [])
                 progress e##.loaded e##.total;
                 Js._true)
       | None -> ());
-      Optdef.iter req##.upload (fun upload ->
-          match upload_progress with
-          | Some upload_progress ->
-              upload##.onprogress :=
-                Dom.handler (fun e ->
-                    upload_progress e##.loaded e##.total;
-                    Js._true)
-          | None -> ());
+      (match upload_progress with
+      | Some upload_progress ->
+          req##.upload##.onprogress
+          := Dom.handler (fun e ->
+                 upload_progress e##.loaded e##.total;
+                 Js._true)
+      | None -> ());
       (match contents with
       | None -> req##send Js.null
       | Some (`Form_contents (`Fields l)) ->
